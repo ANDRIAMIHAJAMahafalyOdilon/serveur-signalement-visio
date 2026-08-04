@@ -63,6 +63,35 @@ io.on('connection', (socket) => {
     socket.on('whiteboard:stroke-end', (payload) => socket.to(socket.data.roomId).emit('whiteboard:stroke-end', payload));
     socket.on('whiteboard:clear', () => socket.to(socket.data.roomId).emit('whiteboard:clear'));
 
+    // --- Permissions de dessin ---
+    // Un participant demande la permission de dessiner : on envoie la demande à l'hôte
+    socket.on('whiteboard:request-draw', ({ roomId }) => {
+        const room = rooms.get(roomId);
+        if (!room) return;
+        const requester = room.get(socket.id);
+        if (!requester) return;
+
+        // Trouver le socket de l'hôte dans la salle
+        const hostEntry = Array.from(room.entries()).find(([, p]) => p.isHost);
+        if (!hostEntry) return;
+        const [hostSocketId] = hostEntry;
+
+        io.to(hostSocketId).emit('whiteboard:draw-request', {
+            socketId: socket.id,
+            username: requester.username,
+        });
+    });
+
+    // L'hôte autorise un participant à dessiner
+    socket.on('whiteboard:allow-draw', ({ targetSocketId }) => {
+        io.to(targetSocketId).emit('whiteboard:draw-granted');
+    });
+
+    // L'hôte refuse la demande de dessin
+    socket.on('whiteboard:deny-draw', ({ targetSocketId }) => {
+        io.to(targetSocketId).emit('whiteboard:draw-denied');
+    });
+
     // --- Chat ---
     socket.on('chat:send', ({ roomId, sender, text }) => {
         const message = {
