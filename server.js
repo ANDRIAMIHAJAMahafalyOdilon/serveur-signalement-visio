@@ -58,38 +58,18 @@ io.on('connection', (socket) => {
     socket.on('webrtc:ice-candidate', ({ to, candidate }) => io.to(to).emit('webrtc:ice-candidate', { from: socket.id, candidate }));
 
     // --- Tableau Blanc Collaboratif ---
-    socket.on('whiteboard:stroke-start', (stroke) => socket.to(socket.data.roomId).emit('whiteboard:stroke-start', stroke));
-    socket.on('whiteboard:stroke-update', (payload) => socket.to(socket.data.roomId).emit('whiteboard:stroke-update', payload));
-    socket.on('whiteboard:stroke-end', (payload) => socket.to(socket.data.roomId).emit('whiteboard:stroke-end', payload));
-    socket.on('whiteboard:clear', () => socket.to(socket.data.roomId).emit('whiteboard:clear'));
-
-    // --- Permissions de dessin ---
-    // Un participant demande la permission de dessiner : on envoie la demande à l'hôte
-    socket.on('whiteboard:request-draw', ({ roomId }) => {
-        const room = rooms.get(roomId);
-        if (!room) return;
-        const requester = room.get(socket.id);
-        if (!requester) return;
-
-        // Trouver le socket de l'hôte dans la salle
-        const hostEntry = Array.from(room.entries()).find(([, p]) => p.isHost);
-        if (!hostEntry) return;
-        const [hostSocketId] = hostEntry;
-
-        io.to(hostSocketId).emit('whiteboard:draw-request', {
-            socketId: socket.id,
-            username: requester.username,
-        });
+    socket.on('whiteboard:stroke-start', (stroke) => {
+        // Broadcaster à TOUTE la room (y compris l'expéditeur) pour synchronisation temps réel
+        io.in(socket.data.roomId).emit('whiteboard:stroke-start', stroke);
     });
-
-    // L'hôte autorise un participant à dessiner
-    socket.on('whiteboard:allow-draw', ({ targetSocketId }) => {
-        io.to(targetSocketId).emit('whiteboard:draw-granted');
+    socket.on('whiteboard:stroke-update', (payload) => {
+        io.in(socket.data.roomId).emit('whiteboard:stroke-update', payload);
     });
-
-    // L'hôte refuse la demande de dessin
-    socket.on('whiteboard:deny-draw', ({ targetSocketId }) => {
-        io.to(targetSocketId).emit('whiteboard:draw-denied');
+    socket.on('whiteboard:stroke-end', (payload) => {
+        io.in(socket.data.roomId).emit('whiteboard:stroke-end', payload);
+    });
+    socket.on('whiteboard:clear', () => {
+        io.in(socket.data.roomId).emit('whiteboard:clear');
     });
 
     // --- Chat ---
@@ -100,7 +80,8 @@ io.on('connection', (socket) => {
             text,
             timestamp: new Date().toISOString(),
         };
-        io.to(roomId).emit('chat:message', message);
+        // Envoie à TOUTE la room (y compris l'expéditeur)
+        io.in(roomId).emit('chat:message', message);
     });
 
     // --- Lever la main ---
