@@ -12,7 +12,15 @@ const io = new Server(server, {
     cors: {
         origin: ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : "*",
         methods: ["GET", "POST"]
-    }
+    },
+    // Récupère les événements perdus pendant une courte déconnexion
+    connectionStateRecovery: {
+        maxDisconnectionDuration: 2 * 60 * 1000,
+        skipMiddlewares: true,
+    },
+    // Limite explicite de la taille des messages (défaut socket.io = 1 Mo)
+    maxHttpBufferSize: 1_000_000,
+    serveClient: false,
 });
 
 // Sanitise le texte: supprime les balises HTML et limite la longueur
@@ -54,8 +62,14 @@ app.get('/health', (req, res) => {
 
 const rooms = new Map();
 const whiteboards = new Map();
+const chatHistory = new Map();
 const ROOM_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const roomTimers = new Map();
+
+// Limites pour éviter l'explosion du maillage WebRTC et de la mémoire
+const MAX_PARTICIPANTS = 10;
+const MAX_STROKES_PER_BOARD = 300;
+const CHAT_HISTORY_LIMIT = 50;
 
 function scheduleRoomCleanup(roomId) {
     if (roomTimers.has(roomId)) return;
@@ -64,6 +78,7 @@ function scheduleRoomCleanup(roomId) {
         if (room && room.size === 0) {
             rooms.delete(roomId);
             whiteboards.delete(roomId);
+            chatHistory.delete(roomId);
             roomTimers.delete(roomId);
             console.log(`[CLEAN] Salon ${roomId} supprimé (TTL expiré)`);
         }
@@ -140,9 +155,10 @@ io.on('connection', (socket) => {
                 await socket.leave(previousRoomId);
                 socket.to(previousRoomId).emit('room:user-left', socket.id);
                 if (previousUser?.isHost && previousRoom.size > 0) {
-                    const [, nextParticipant] = Array.from(previousRoom.entries())[0];
+                    const [nextId, nextParticipant] = Array.from(previousRoom.entries())[0];
                     nextParticipant.isHost = true;
-                    io.to(Array.from(previousRoom.keys())[0]).emit('room:you-are-host');
+                    io.to(nextId).emit('room:you-are-host');
+                    io.to(previousRoomId).emit('room:host-changed', { socketId: nextId });
                 }
                 if (previousRoom.size === 0) scheduleRoomCleanup(previousRoomId);
             }
@@ -153,6 +169,13 @@ io.on('connection', (socket) => {
             cancelRoomCleanup(roomId);
             const room = rooms.get(roomId);
 
+            // Limite de participants pour éviter le maillage WebRTC O(n²)
+            if (room.size >= MAX_PARTICIPANTS && !room.has(socket.id)) {
+                socket.emit('room:error', { message: `Cette salle est pleine (${MAX_PARTICIPANTS} participants max).` });
+                await socket.leave(roomId);
+                return;
+            }
+
             const alreadyHasHost = Array.from(room.values()).some((p) => p.isHost);
             const finalIsHost = isHost && !alreadyHasHost;
 
@@ -160,8 +183,19 @@ io.on('connection', (socket) => {
             socket.data.roomId = roomId;
             room.set(socket.id, { username, isHost: finalIsHost });
             socket.emit('room:participants', others);
+
+            // Indique à l'arrivant quel socket est l'hôte (peut être lui-même)
+            const currentHostId = Array.from(room.entries()).find(([, p]) => p.isHost)?.[0] ?? null;
+            socket.emit('room:host', { socketId: currentHostId });
+
             socket.to(roomId).emit('room:user-joined', { socketId: socket.id, username });
             socket.emit('whiteboard:state', Array.from(whiteboards.get(roomId)?.values() ?? []).map(publicStroke));
+
+            // Historique de chat pour le nouvel arrivant
+            const history = chatHistory.get(roomId);
+            if (history && history.length > 0) {
+                socket.emit('chat:history', history);
+            }
 
             console.log(`[ROOM] ${username} a rejoint ${roomId}. Total: ${room.size}`);
         } catch (err) {
@@ -199,6 +233,10 @@ io.on('connection', (socket) => {
         if (!whiteboards.has(roomId)) whiteboards.set(roomId, new Map());
         const board = whiteboards.get(roomId);
         if (board.has(payload.id)) return;
+        if (board.size >= MAX_STROKES_PER_BOARD) {
+            socket.emit('room:error', { message: "Tableau saturé — l'hôte peut l'effacer." });
+            return;
+        }
         const stroke = { ...payload, authorId: authorized.room.get(socket.id).username, ownerId: socket.id };
         whiteboards.get(roomId).set(stroke.id, stroke);
         socket.to(roomId).emit('whiteboard:stroke-start', publicStroke(stroke));
@@ -255,6 +293,13 @@ io.on('connection', (socket) => {
         };
 
         console.log(`[CHAT] [${roomId}] ${sender}: ${text.slice(0, 50)}`);
+
+        // Bufferise l'historique pour les arrivants suivants
+        const history = chatHistory.get(roomId) ?? [];
+        history.push(message);
+        while (history.length > CHAT_HISTORY_LIMIT) history.shift();
+        chatHistory.set(roomId, history);
+
         io.in(roomId).emit('chat:message', message);
     });
 
@@ -283,6 +328,7 @@ io.on('connection', (socket) => {
                 const [nextId, nextParticipant] = Array.from(room.entries())[0];
                 nextParticipant.isHost = true;
                 io.to(nextId).emit('room:you-are-host');
+                io.to(roomId).emit('room:host-changed', { socketId: nextId });
                 console.log(`[HOST] Nouveau host pour ${roomId}: ${nextParticipant.username}`);
             }
 
