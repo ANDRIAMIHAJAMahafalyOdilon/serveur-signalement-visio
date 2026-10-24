@@ -162,6 +162,7 @@ io.on('connection', (socket) => {
                 }
                 if (previousRoom.size === 0) scheduleRoomCleanup(previousRoomId);
             }
+            if (previousRoomId && previousRoomId !== roomId) socket.data.roomId = null;
 
             await socket.join(roomId);
 
@@ -173,13 +174,18 @@ io.on('connection', (socket) => {
             if (room.size >= MAX_PARTICIPANTS && !room.has(socket.id)) {
                 socket.emit('room:error', { message: `Cette salle est pleine (${MAX_PARTICIPANTS} participants max).` });
                 await socket.leave(roomId);
+                socket.data.roomId = null;
                 return;
             }
 
             const alreadyHasHost = Array.from(room.values()).some((p) => p.isHost);
             const finalIsHost = isHost && !alreadyHasHost;
 
-            const others = Array.from(room.entries()).map(([id, p]) => ({ socketId: id, username: p.username }));
+            // Exclut le socket courant lors d'un re-join après reconnexion :
+            // le client ne doit jamais créer une connexion WebRTC vers lui-même.
+            const others = Array.from(room.entries())
+                .filter(([id]) => id !== socket.id)
+                .map(([id, p]) => ({ socketId: id, username: p.username }));
             socket.data.roomId = roomId;
             room.set(socket.id, { username, isHost: finalIsHost });
             socket.emit('room:participants', others);
